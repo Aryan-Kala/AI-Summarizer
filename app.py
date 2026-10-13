@@ -6,6 +6,7 @@ import urllib.request
 from datetime import datetime
 import traceback
 from urllib.parse import urlparse, parse_qs
+from yt_dlp.networking.impersonate import ImpersonateTarget
 
 import streamlit as st
 import yt_dlp
@@ -121,6 +122,7 @@ def download_audio(youtube_url, temp_dir):
         "noplaylist": True,
         "quiet": True,
         "retries": 3,
+        "impersonate": ImpersonateTarget(client='chrome'), # <--- ADD THIS BACK
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
