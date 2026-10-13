@@ -348,6 +348,7 @@ if st.button("Generate Summary & PDF"):
                 st.code(traceback.format_exc())
 
 # --- Edit, Preview & Download ---
+# --- Edit, Preview & Download ---
 if "result" in st.session_state:
     st.success("Summary generated! Edit it below, then download your PDF.")
 
@@ -375,12 +376,9 @@ if "result" in st.session_state:
                 mime="application/pdf",
             )
 
-            with st.expander("👁 Preview PDF"):
-                b64 = base64.b64encode(pdf_bytes).decode()
-                st.markdown(
-                    f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="700"></iframe>',
-                    unsafe_allow_html=True,
-                )
+            with st.expander("ℹ️ About the PDF"):
+                st.info("Your custom PDF has been successfully compiled with professional styling and is ready for download above!")
+
         except Exception:
             st.error("Could not build the PDF. Details below:")
             st.code(traceback.format_exc())
