@@ -122,7 +122,8 @@ def download_audio(youtube_url, temp_dir):
         "noplaylist": True,
         "quiet": True,
         "retries": 3,
-        "impersonate": ImpersonateTarget(client='chrome'), # <--- ADD THIS BACK
+        "cookiefile": "cookies.txt",
+        "impersonate": ImpersonateTarget(client='chrome'),
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
