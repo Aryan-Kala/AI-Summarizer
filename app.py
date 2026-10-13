@@ -9,6 +9,7 @@ from urllib.parse import urlparse, parse_qs
 from yt_dlp.networking.impersonate import ImpersonateTarget
 
 import streamlit as st
+import streamlit.components.v1 as components
 import yt_dlp
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -112,17 +113,17 @@ def fetch_transcript(video_id):
     fetched = transcript.fetch()
     return " ".join(snippet.text for snippet in fetched)
 
-
 def download_audio(youtube_url, temp_dir):
     """Downloads audio and returns the final .mp3 path.
     Tries several YouTube player clients, because a 403 is usually client-specific."""
+    cookie_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
+    
     base_opts = {
         "format": "bestaudio/best",
         "outtmpl": os.path.join(temp_dir, "audio.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
         "retries": 3,
-        "cookiefile": "cookies.txt",
         "impersonate": ImpersonateTarget(client='chrome'),
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
@@ -131,38 +132,26 @@ def download_audio(youtube_url, temp_dir):
         }],
     }
 
+    # 1. Prioritize cookies.txt file if it exists
+    if os.path.exists(cookie_path):
+        base_opts["cookiefile"] = cookie_path
+        
+    # 2. Local FFmpeg check (Streamlit will safely ignore this and use the system FFmpeg)
     if any(os.path.exists(f) for f in ("ffmpeg.exe", "ffmpeg")):
         base_opts["ffmpeg_location"] = os.path.abspath(".")
 
-    # Optional: browser cookies, e.g. YT_COOKIES_BROWSER=firefox in pass.env
+    # 3. FIX: yt-dlp API requires a 4-item tuple
     cookies_browser = os.getenv("YT_COOKIES_BROWSER")
     if cookies_browser:
-        base_opts["cookiesfrombrowser"] = (cookies_browser,)
+        # Pad the tuple with None for the missing keyring, profile, and container arguments
+        base_opts["cookiesfrombrowser"] = (cookies_browser, None, None, None)
 
-    attempts = [
-        {},  # yt-dlp defaults
-        {"extractor_args": {"youtube": {"player_client": ["tv", "web_safari"]}}},
-        {"extractor_args": {"youtube": {"player_client": ["android_vr"]}}},
-        {"extractor_args": {"youtube": {"player_client": ["ios"]}}},
-    ]
-
-    errors = []
-    for extra in attempts:
-        try:
-            with yt_dlp.YoutubeDL({**base_opts, **extra}) as ydl:
-                ydl.download([youtube_url])
-            final_path = os.path.join(temp_dir, "audio.mp3")
-            if os.path.exists(final_path):
-                return final_path
-        except yt_dlp.utils.DownloadError as e:
-            errors.append(str(e).splitlines()[-1])
-
-    raise RuntimeError(
-        "All download strategies failed (YouTube is blocking the request). "
-        "Update yt-dlp, install Deno, or set YT_COOKIES_BROWSER. Errors: "
-        + " | ".join(errors)
-    )
-
+    # 4. Execute the download
+    with yt_dlp.YoutubeDL(base_opts) as ydl:
+        ydl.extract_info(youtube_url, download=True)
+        
+    # 5. Return the final path resolved by the FFmpegExtractAudio postprocessor
+    return os.path.join(temp_dir, "audio.mp3")
 
 # --- Premium PDF fonts (Lato, auto-downloaded once into ./fonts) ---
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
@@ -199,9 +188,9 @@ def clean_markdown(text, unicode_ok):
 
 
 class PremiumPDF(FPDF):
-    def __init__(self, theme, fonts_ok):
+    def __init__(self, theme, fonts_ok, footer_text="Video Summary"):
         super().__init__(format="A4")
-        self.theme, self.fonts_ok = theme, fonts_ok
+        self.theme, self.fonts_ok, self.footer_text = theme, fonts_ok, footer_text
         self.set_margins(20, 18, 20)
         self.set_auto_page_break(True, margin=22)
         if fonts_ok:
@@ -223,14 +212,14 @@ class PremiumPDF(FPDF):
         self.set_y(-11)
         self.set_font(self.f_light, size=8.5)
         self.set_text_color(*MUTED)
-        self.cell(0, 6, "Video Summary", align="L")
+        self.cell(0, 6, clean_markdown(self.footer_text, self.fonts_ok), align="L")
         self.set_x(self.l_margin)
         self.cell(0, 6, f"{self.page_no()}", align="R")
 
 
-def generate_pdf(summary_text, filepath, title="Video Summary", theme_name="Navy & Gold", fonts_ok=True):
+def generate_pdf(summary_text, filepath, title="Video Summary", footer_text="Video Summary", theme_name="Navy & Gold", fonts_ok=True):
     theme = THEMES.get(theme_name, THEMES["Navy & Gold"])
-    pdf = PremiumPDF(theme, fonts_ok)
+    pdf = PremiumPDF(theme, fonts_ok, footer_text=footer_text)
     pdf.add_page()
 
     # Cover banner
@@ -286,6 +275,137 @@ def generate_pdf(summary_text, filepath, title="Video Summary", theme_name="Navy
             pdf.ln(3.5)
 
     pdf.output(filepath)
+
+
+def render_pdf_preview(pdf_bytes, height=700):
+    """Renders an interactive, multi-page PDF preview using PDF.js on HTML5 canvases.
+    Bypasses browser restrictions on data:application/pdf iframes."""
+    b64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+    html_code = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            * {{ box-sizing: border-box; }}
+            body {{
+                margin: 0;
+                padding: 16px;
+                background: #1e1e24;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                color: #e0e0e0;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+            }}
+            #toolbar {{
+                width: 100%;
+                max-width: 820px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                background: #2b2b36;
+                padding: 8px 14px;
+                border-radius: 6px;
+                margin-bottom: 14px;
+                font-size: 13px;
+                box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+            }}
+            #toolbar button {{
+                background: #3a3a48;
+                color: #fff;
+                border: 1px solid #505062;
+                border-radius: 4px;
+                padding: 4px 10px;
+                cursor: pointer;
+                font-size: 12px;
+            }}
+            #toolbar button:hover {{
+                background: #4b4b5e;
+            }}
+            #pdf-container {{
+                width: 100%;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 16px;
+            }}
+            .pdf-page {{
+                background: white;
+                box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+                border-radius: 4px;
+                max-width: 100%;
+                height: auto !important;
+            }}
+            #status {{
+                padding: 24px;
+                text-align: center;
+                color: #b0b0c0;
+            }}
+        </style>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    </head>
+    <body>
+        <div id="toolbar">
+            <span id="page-info">Loading PDF preview...</span>
+            <button id="open-tab-btn" type="button">Open in New Tab ↗</button>
+        </div>
+        <div id="status">Rendering pages...</div>
+        <div id="pdf-container"></div>
+
+        <script>
+            const b64Data = "{b64_pdf}";
+            const raw = atob(b64Data);
+            const uint8Array = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) {{
+                uint8Array[i] = raw.charCodeAt(i);
+            }}
+
+            document.getElementById("open-tab-btn").addEventListener("click", () => {{
+                const blob = new Blob([uint8Array], {{ type: "application/pdf" }});
+                const url = URL.createObjectURL(blob);
+                window.open(url, "_blank");
+            }});
+
+            const pdfjsLib = window["pdfjs-dist/build/pdf"];
+            if (!pdfjsLib) {{
+                document.getElementById("status").textContent =
+                    "Could not load PDF renderer (check internet connection). Use 'Open in New Tab' above.";
+            }} else {{
+                pdfjsLib.GlobalWorkerOptions.workerSrc =
+                    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+                pdfjsLib.getDocument({{ data: uint8Array }}).promise.then(async (pdf) => {{
+                    document.getElementById("status").style.display = "none";
+                    document.getElementById("page-info").textContent =
+                        `Preview (${{pdf.numPages}} ${{pdf.numPages === 1 ? "page" : "pages"}})`;
+                    const container = document.getElementById("pdf-container");
+                    const dpr = window.devicePixelRatio || 1;
+                    const scale = 1.35 * dpr;
+
+                    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {{
+                        const page = await pdf.getPage(pageNum);
+                        const viewport = page.getViewport({{ scale }});
+                        const canvas = document.createElement("canvas");
+                        canvas.className = "pdf-page";
+                        canvas.width = viewport.width;
+                        canvas.height = viewport.height;
+                        canvas.style.width = `${{viewport.width / dpr}}px`;
+                        container.appendChild(canvas);
+
+                        const ctx = canvas.getContext("2d");
+                        await page.render({{ canvasContext: ctx, viewport }}).promise;
+                    }}
+                }}).catch((err) => {{
+                    document.getElementById("status").textContent =
+                        "Failed to render PDF preview: " + err.message;
+                }});
+            }}
+        </script>
+    </body>
+    </html>
+    """
+    components.html(html_code, height=height, scrolling=True)
 
 
 # --- Main App Logic ---
@@ -345,17 +465,21 @@ if st.button("Generate Summary & PDF"):
                     st.session_state["result"] = {"summary": summary}
                     st.session_state["edited_summary"] = summary
                     st.session_state["pdf_title"] = "Video Summary"
+                    st.session_state["pdf_footer"] = "Video Summary"
 
             except Exception:
                 st.error("A background component crashed. See the exact details below:")
                 st.code(traceback.format_exc())
 
 # --- Edit, Preview & Download ---
-# --- Edit, Preview & Download ---
 if "result" in st.session_state:
     st.success("Summary generated! Edit it below, then download your PDF.")
 
+    if "pdf_footer" not in st.session_state:
+        st.session_state["pdf_footer"] = "Video Summary"
+
     pdf_title = st.text_input("PDF title:", key="pdf_title")
+    pdf_footer = st.text_input("PDF footer:", key="pdf_footer")
     st.caption('Tip: start a line with "- " for a bullet. A short line without "- " becomes a section heading.')
     edited = st.text_area("Edit your summary:", key="edited_summary", height=450)
 
@@ -368,7 +492,7 @@ if "result" in st.session_state:
             with tempfile.TemporaryDirectory() as tmp:
                 pdf_path = os.path.join(tmp, "summary.pdf")
                 generate_pdf(edited, pdf_path, title=pdf_title or "Video Summary",
-                             theme_name=theme_name, fonts_ok=fonts_ok)
+                             footer_text=pdf_footer, theme_name=theme_name, fonts_ok=fonts_ok)
                 with open(pdf_path, "rb") as f:
                     pdf_bytes = f.read()
 
@@ -379,8 +503,8 @@ if "result" in st.session_state:
                 mime="application/pdf",
             )
 
-            with st.expander("ℹ️ About the PDF"):
-                st.info("Your custom PDF has been successfully compiled with professional styling and is ready for download above!")
+            with st.expander("👁 Preview PDF", expanded=True):
+                render_pdf_preview(pdf_bytes)
 
         except Exception:
             st.error("Could not build the PDF. Details below:")
