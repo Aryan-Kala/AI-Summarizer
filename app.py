@@ -102,32 +102,18 @@ def extract_video_id(url):
     return None
 
 
-def fetch_transcript(video_id):
-    """youtube-transcript-api >= 1.0: get_transcript() was removed and
-    snippets are objects (.text), not dicts (['text'])."""
-    api = YouTubeTranscriptApi()
-    transcript_list = api.list(video_id)
-    try:
-        transcript = transcript_list.find_transcript(["en"])
-    except Exception:
-        transcript = next(iter(transcript_list))  # any available language
-    fetched = transcript.fetch()
-    return " ".join(snippet.text for snippet in fetched)
-
 def download_audio(youtube_url, temp_dir):
     """Downloads audio and returns the final .mp3 path.
-    Tries several YouTube player clients, because a 403 is usually client-specific."""
-    cookie_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
-    
+    Uses IPv4 and mobile clients to bypass cloud IP blocks."""
     base_opts = {
         "format": "bestaudio/best",
         "outtmpl": os.path.join(temp_dir, "audio.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
         "retries": 3,
+        "source_address": "0.0.0.0",  # Forces IPv4 to bypass Streamlit's IPv6 blocks
         "js_runtimes": {"node": {}}, 
         "impersonate": ImpersonateTarget(client='chrome'),
-        # REMOVED 'web' so yt-dlp only uses IP-agnostic mobile clients
         "extractor_args": {"youtube": ["player_client=ios,android"]},
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
@@ -136,27 +122,14 @@ def download_audio(youtube_url, temp_dir):
         }],
     }
 
-    # 1. Prioritize cookies.txt file if it exists
-    if os.path.exists(cookie_path):
-        base_opts["cookiefile"] = cookie_path
-        
-    # 2. Local FFmpeg check (Streamlit will safely ignore this and use the system FFmpeg)
     if any(os.path.exists(f) for f in ("ffmpeg.exe", "ffmpeg")):
         base_opts["ffmpeg_location"] = os.path.abspath(".")
 
-    # 3. FIX: yt-dlp API requires a 4-item tuple
-    cookies_browser = os.getenv("YT_COOKIES_BROWSER")
-    if cookies_browser:
-        # Pad the tuple with None for the missing keyring, profile, and container arguments
-        base_opts["cookiesfrombrowser"] = (cookies_browser, None, None, None)
-
-    # 4. Execute the download
     with yt_dlp.YoutubeDL(base_opts) as ydl:
         ydl.extract_info(youtube_url, download=True)
         
-    # 5. Return the final path resolved by the FFmpegExtractAudio postprocessor
     return os.path.join(temp_dir, "audio.mp3")
-
+    
 # --- Premium PDF fonts (Lato, auto-downloaded once into ./fonts) ---
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/lato/"
