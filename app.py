@@ -11,7 +11,8 @@ from yt_dlp.networking.impersonate import ImpersonateTarget
 import streamlit as st
 import streamlit.components.v1 as components
 import yt_dlp
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 from faster_whisper import WhisperModel
 from fpdf import FPDF
@@ -124,8 +125,9 @@ def download_audio(youtube_url, temp_dir):
         "noplaylist": True,
         "quiet": True,
         "retries": 3,
+        "js_runtimes": ["node"], # <--- ADD THIS LINE
         "impersonate": ImpersonateTarget(client='chrome'),
-        "extractor_args": {"youtube": ["player_client=android,web"]}, # <--- ADD THIS LINE
+        "extractor_args": {"youtube": ["player_client=android,web"]},
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
@@ -452,14 +454,16 @@ if st.button("Generate Summary & PDF"):
 
                     # --- Step 3: Summarize ---
                     with st.spinner("Summarizing transcript with Gemini..."):
-                        genai.configure(api_key=api_key)
-                        genai_model = genai.GenerativeModel(
-                            GEMINI_MODEL,
-                            system_instruction=custom_instructions,
-                        )
-
+                        client = genai.Client(api_key=api_key)
                         prompt = f"Summarize the following video transcript.\n\nTranscript:\n{transcript}"
-                        response = genai_model.generate_content(prompt)
+                        
+                        response = client.models.generate_content(
+                            model=GEMINI_MODEL,
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                system_instruction=custom_instructions,
+                            )
+                        )
                         summary = response.text
 
                     # Seed the editable text box with the new summary

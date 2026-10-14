@@ -1,8 +1,8 @@
 streamlit
 youtube-transcript-api
-yt-dlp
 faster-whisper
-google-generativeai
+google-genai
+yt-dlp[default]
 fpdf2
 curl_cffi
 python-dotenv
