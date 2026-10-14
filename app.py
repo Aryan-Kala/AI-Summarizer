@@ -113,32 +113,51 @@ def fetch_transcript(video_id):
     return " ".join(snippet.text for snippet in fetched)
 
 def download_audio(youtube_url, temp_dir):
-    """Downloads audio and returns the final .mp3 path.
-    Uses IPv4 and TV clients to bypass cloud IP blocks."""
-    base_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": os.path.join(temp_dir, "audio.%(ext)s"),
-        "noplaylist": True,
-        "quiet": True,
-        "retries": 3,
-        "source_address": "0.0.0.0",
-        "impersonate": ImpersonateTarget(client='chrome'),
-        "extractor_args": {"youtube": ["player_client=tv"]},
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }],
-    }
+    """Downloads audio via RapidAPI, bypassing server IP blocks completely."""
+    rapidapi_key = os.getenv("RAPIDAPI_KEY")
+    if not rapidapi_key:
+        raise ValueError("RAPIDAPI_KEY is missing from Streamlit Secrets.")
 
-    if any(os.path.exists(f) for f in ("ffmpeg.exe", "ffmpeg")):
-        base_opts["ffmpeg_location"] = os.path.abspath(".")
+    # Using the YouTube Info & Download API endpoint as an example
+    host = "youtube-info-download-api.p.rapidapi.com"
+    api_url = f"https://{host}/ajax/download.php?url={urllib.parse.quote(youtube_url)}&format=mp3"
 
-    with yt_dlp.YoutubeDL(base_opts) as ydl:
-        ydl.extract_info(youtube_url, download=True)
-        
-    return os.path.join(temp_dir, "audio.mp3")
+    req = urllib.request.Request(
+        api_url,
+        headers={
+            "x-rapidapi-key": rapidapi_key,
+            "x-rapidapi-host": host
+        }
+    )
 
+    # 1. Request conversion/download link
+    with urllib.request.urlopen(req) as response:
+        data = json.loads(response.read().decode())
+    
+    # 2. Extract direct file URL (handling async progress if needed)
+    download_url = data.get("download_url")
+    if not download_url and "progress_url" in data:
+        # If the API uses a progress poll loop
+        import time
+        progress_url = data["progress_url"]
+        for _ in xrange(10): # up to 20 seconds max
+            time.sleep(2)
+            req_prog = urllib.request.Request(progress_url, headers={"x-rapidapi-key": rapidapi_key, "x-rapidapi-host": host})
+            with urllib.request.urlopen(req_prog) as p_res:
+                p_data = json.loads(p_res.read().decode())
+                if p_data.get("success") == 1:
+                    download_url = p_data.get("download_url")
+                    break
+
+    if not download_url:
+        raise RuntimeError("Failed to retrieve direct audio download link from RapidAPI.")
+
+    # 3. Stream and save the final MP3 file locally into the temp directory
+    final_mp3_path = os.path.join(temp_dir, "audio.mp3")
+    urllib.request.urlretrieve(download_url, final_mp3_path)
+    
+    return final_mp3_path
+    
 # --- Premium PDF fonts (Lato, auto-downloaded once into ./fonts) ---
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/lato/"
