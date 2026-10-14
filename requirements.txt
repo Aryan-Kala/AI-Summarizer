@@ -6,3 +6,4 @@ yt-dlp[default]
 fpdf2
 curl_cffi
 python-dotenv
+yt-dlp-ejs

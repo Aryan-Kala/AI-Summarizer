@@ -122,9 +122,7 @@ def download_audio(youtube_url, temp_dir):
         "quiet": True,
         "retries": 3,
         "source_address": "0.0.0.0",
-        "js_runtimes": {"node": {}}, 
         "impersonate": ImpersonateTarget(client='chrome'),
-        # Smart TV clients bypass IP mismatch blocks better than mobile
         "extractor_args": {"youtube": ["player_client=tv"]},
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
@@ -140,7 +138,7 @@ def download_audio(youtube_url, temp_dir):
         ydl.extract_info(youtube_url, download=True)
         
     return os.path.join(temp_dir, "audio.mp3")
-    
+
 # --- Premium PDF fonts (Lato, auto-downloaded once into ./fonts) ---
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/lato/"
