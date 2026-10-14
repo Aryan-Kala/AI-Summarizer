@@ -100,21 +100,32 @@ def extract_video_id(url):
         if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
             return vid
     return None
-
+def fetch_transcript(video_id):
+    """youtube-transcript-api >= 1.0: get_transcript() was removed and
+    snippets are objects (.text), not dicts (['text'])."""
+    api = YouTubeTranscriptApi()
+    transcript_list = api.list(video_id)
+    try:
+        transcript = transcript_list.find_transcript(["en"])
+    except Exception:
+        transcript = next(iter(transcript_list))  # any available language
+    fetched = transcript.fetch()
+    return " ".join(snippet.text for snippet in fetched)
 
 def download_audio(youtube_url, temp_dir):
     """Downloads audio and returns the final .mp3 path.
-    Uses IPv4 and mobile clients to bypass cloud IP blocks."""
+    Uses IPv4 and TV clients to bypass cloud IP blocks."""
     base_opts = {
         "format": "bestaudio/best",
         "outtmpl": os.path.join(temp_dir, "audio.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
         "retries": 3,
-        "source_address": "0.0.0.0",  # Forces IPv4 to bypass Streamlit's IPv6 blocks
+        "source_address": "0.0.0.0",
         "js_runtimes": {"node": {}}, 
         "impersonate": ImpersonateTarget(client='chrome'),
-        "extractor_args": {"youtube": ["player_client=ios,android"]},
+        # Smart TV clients bypass IP mismatch blocks better than mobile
+        "extractor_args": {"youtube": ["player_client=tv"]},
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
