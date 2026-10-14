@@ -125,6 +125,7 @@ def download_audio(youtube_url, temp_dir):
         "quiet": True,
         "retries": 3,
         "impersonate": ImpersonateTarget(client='chrome'),
+        "extractor_args": {"youtube": ["player_client=android,web"]}, # <--- ADD THIS LINE
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
