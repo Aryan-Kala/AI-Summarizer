@@ -125,9 +125,10 @@ def download_audio(youtube_url, temp_dir):
         "noplaylist": True,
         "quiet": True,
         "retries": 3,
-        "js_runtimes": {"node": {}},
+        "js_runtimes": {"node": {}}, 
         "impersonate": ImpersonateTarget(client='chrome'),
-        "extractor_args": {"youtube": ["player_client=android,web"]},
+        # REMOVED 'web' so yt-dlp only uses IP-agnostic mobile clients
+        "extractor_args": {"youtube": ["player_client=ios,android"]},
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
