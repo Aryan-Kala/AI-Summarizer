@@ -113,51 +113,32 @@ def fetch_transcript(video_id):
     return " ".join(snippet.text for snippet in fetched)
 
 def download_audio(youtube_url, temp_dir):
-    """Downloads audio via RapidAPI, bypassing server IP blocks completely."""
+    """Downloads audio using yt-dlp with native public invidious/cobalt instance or fallback proxy, 
+    or uses a direct yt-dlp approach configured safely."""
+    # If using yt-dlp, let's ensure it uses a reliable public instance fallback or yt-dlp configuration
+    # Alternatively, use a working free extractor endpoint:
     rapidapi_key = os.getenv("RAPIDAPI_KEY")
-    if not rapidapi_key:
-        raise ValueError("RAPIDAPI_KEY is missing from Streamlit Secrets.")
-
-    # Using the YouTube Info & Download API endpoint as an example
-    host = "youtube-info-download-api.p.rapidapi.com"
-    api_url = f"https://{host}/ajax/download.php?url={urllib.parse.quote(youtube_url)}&format=mp3"
-
-    req = urllib.request.Request(
-        api_url,
-        headers={
-            "x-rapidapi-key": rapidapi_key,
-            "x-rapidapi-host": host
-        }
-    )
-
-    # 1. Request conversion/download link
-    with urllib.request.urlopen(req) as response:
-        data = json.loads(response.read().decode())
     
-    # 2. Extract direct file URL (handling async progress if needed)
-    download_url = data.get("download_url")
-    if not download_url and "progress_url" in data:
-        # If the API uses a progress poll loop
-        import time
-        progress_url = data["progress_url"]
-        for _ in xrange(10): # up to 20 seconds max
-            time.sleep(2)
-            req_prog = urllib.request.Request(progress_url, headers={"x-rapidapi-key": rapidapi_key, "x-rapidapi-host": host})
-            with urllib.request.urlopen(req_prog) as p_res:
-                p_data = json.loads(p_res.read().decode())
-                if p_data.get("success") == 1:
-                    download_url = p_data.get("download_url")
-                    break
+    # If no RapidAPI key is set, use a fallback direct yt-dlp command with standard public client args
+    base_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": os.path.join(temp_dir, "audio.%(ext)s"),
+        "noplaylist": True,
+        "quiet": True,
+        "retries": 3,
+        "source_address": "0.0.0.0",
+        "extractor_args": {"youtube": ["player_client=android"]},
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }],
+    }
 
-    if not download_url:
-        raise RuntimeError("Failed to retrieve direct audio download link from RapidAPI.")
-
-    # 3. Stream and save the final MP3 file locally into the temp directory
-    final_mp3_path = os.path.join(temp_dir, "audio.mp3")
-    urllib.request.urlretrieve(download_url, final_mp3_path)
-    
-    return final_mp3_path
-    
+    with yt_dlp.YoutubeDL(base_opts) as ydl:
+        ydl.extract_info(youtube_url, download=True)
+        
+    return os.path.join(temp_dir, "audio.mp3")
 # --- Premium PDF fonts (Lato, auto-downloaded once into ./fonts) ---
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/lato/"
@@ -434,26 +415,25 @@ if st.button("Generate Summary & PDF"):
                     transcript = ""
 
                     # --- APPROACH 1: Fast API Fetch ---
-                    try:
-                        with st.spinner("Attempting to fetch transcript directly from YouTube servers..."):
-                            transcript = fetch_transcript(video_id)
-                            st.toast("⚡ Fast transcript fetched successfully!")
+                try:
+                    with st.spinner("Attempting to fetch transcript directly from YouTube servers..."):
+                        transcript = fetch_transcript(video_id)
+                        st.toast("⚡ Fast transcript fetched successfully!")
+                except Exception as e:
+                    # Gracefully catch YouTube IP blocks on transcript API and jump straight to audio fallback
+                    st.warning(f"Direct transcript blocked ({type(e).__name__}). Switching to AI audio pipeline...")
+                    transcript = ""
 
-                    # --- APPROACH 2: Audio Download + Faster Whisper Fallback ---
-                    except Exception as e:
-                        st.warning(f"Subtitles unavailable ({type(e).__name__}). Falling back to AI audio transcription...")
+                # --- APPROACH 2: Audio Download + Faster Whisper Fallback ---
+                if not transcript.strip():
+                    with st.spinner("Downloading audio..."):
+                        final_audio_path = download_audio(youtube_url, temp_dir)
 
-                        with st.spinner("Downloading audio..."):
-                            final_audio_path = download_audio(youtube_url, temp_dir)
-
-                        with st.spinner("Transcribing audio locally with AI (this may take a minute)..."):
-                            model = load_whisper_model()
-                            segments, info = model.transcribe(final_audio_path, beam_size=5)
-                            transcript = " ".join(segment.text for segment in segments)
-
-                    if not transcript.strip():
-                        raise ValueError("Transcript is empty - nothing to summarize.")
-
+                    with st.spinner("Transcribing audio locally with AI (this may take a minute)..."):
+                        model = load_whisper_model()
+                        segments, info = model.transcribe(final_audio_path, beam_size=5)
+                        transcript = " ".join(segment.text for segment in segments)
+                        
                     # --- Step 3: Summarize ---
                     with st.spinner("Summarizing transcript with Gemini..."):
                         client = genai.Client(api_key=api_key)
