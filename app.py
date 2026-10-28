@@ -6,7 +6,6 @@ import urllib.request
 from datetime import datetime
 import traceback
 from urllib.parse import urlparse, parse_qs
-from yt_dlp.networking.impersonate import ImpersonateTarget
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -17,11 +16,16 @@ from dotenv import load_dotenv
 from faster_whisper import WhisperModel
 from fpdf import FPDF
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import GenericProxyConfig
 
 # Load environment variables
 load_dotenv("pass.env")
 
 GEMINI_MODEL = "gemini-2.5-flash"  # gemini-1.5-* models are retired
+
+# Optional: a residential proxy (e.g. http://user:pass@host:port) for the
+# transcript API and yt-dlp. YouTube blocks most cloud/datacenter IPs.
+PROXY_URL = os.getenv("PROXY_URL")
 
 # Edit these defaults to change how every summary is written
 DEFAULT_INSTRUCTIONS = """You are an expert summarizer who turns video transcripts into study notes.
@@ -100,10 +104,13 @@ def extract_video_id(url):
         if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
             return vid
     return None
+
+
 def fetch_transcript(video_id):
     """youtube-transcript-api >= 1.0: get_transcript() was removed and
     snippets are objects (.text), not dicts (['text'])."""
-    api = YouTubeTranscriptApi()
+    proxy = GenericProxyConfig(http_url=PROXY_URL, https_url=PROXY_URL) if PROXY_URL else None
+    api = YouTubeTranscriptApi(proxy_config=proxy)
     transcript_list = api.list(video_id)
     try:
         transcript = transcript_list.find_transcript(["en"])
@@ -113,32 +120,64 @@ def fetch_transcript(video_id):
     return " ".join(snippet.text for snippet in fetched)
 
 def download_audio(youtube_url, temp_dir):
-    """Downloads audio using yt-dlp with native public invidious/cobalt instance or fallback proxy, 
-    or uses a direct yt-dlp approach configured safely."""
-    # If using yt-dlp, let's ensure it uses a reliable public instance fallback or yt-dlp configuration
-    # Alternatively, use a working free extractor endpoint:
-    rapidapi_key = os.getenv("RAPIDAPI_KEY")
-    
-    # If no RapidAPI key is set, use a fallback direct yt-dlp command with standard public client args
-    base_opts = {
+    """Downloads the audio track with yt-dlp. faster-whisper decodes any
+    audio format itself, so no ffmpeg conversion step is needed."""
+    opts = {
         "format": "bestaudio/best",
         "outtmpl": os.path.join(temp_dir, "audio.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
         "retries": 3,
-        "source_address": "0.0.0.0",
-        "extractor_args": {"youtube": ["player_client=android"]},
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }],
+        "source_address": "0.0.0.0",  # force IPv4
+        # yt-dlp only enables deno by default; packages.txt installs node,
+        # which is needed to solve YouTube's JS signature challenges.
+        "js_runtimes": {"deno": {}, "node": {}},
+        # Values must be lists of strings (a plain list is silently ignored)
+        "extractor_args": {"youtube": {"player_client": ["default", "tv", "web_safari"]}},
     }
+    if PROXY_URL:
+        opts["proxy"] = PROXY_URL
 
-    with yt_dlp.YoutubeDL(base_opts) as ydl:
-        ydl.extract_info(youtube_url, download=True)
-        
-    return os.path.join(temp_dir, "audio.mp3")
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(youtube_url, download=True)
+
+    return info["requested_downloads"][0]["filepath"]
+
+
+def response_text(response):
+    text = (response.text or "").strip()
+    if not text:
+        raise RuntimeError("Gemini returned an empty response (it may have been blocked by safety filters).")
+    return text
+
+
+def summarize_transcript(client, transcript):
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=f"Summarize the following video transcript.\n\nTranscript:\n{transcript}",
+        config=types.GenerateContentConfig(system_instruction=custom_instructions),
+    )
+    return response_text(response)
+
+
+def summarize_youtube_url(client, youtube_url):
+    """Gemini fetches public YouTube videos itself, so this never hits
+    YouTube's block on our server's IP. Low resolution keeps long videos
+    within the context window (the summary relies mostly on the audio)."""
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=types.Content(parts=[
+            types.Part(file_data=types.FileData(file_uri=youtube_url)),
+            types.Part(text="Summarize this video based on everything that is said and shown in it."),
+        ]),
+        config=types.GenerateContentConfig(
+            system_instruction=custom_instructions,
+            media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,
+        ),
+    )
+    return response_text(response)
+
+
 # --- Premium PDF fonts (Lato, auto-downloaded once into ./fonts) ---
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/lato/"
@@ -411,48 +450,52 @@ if st.button("Generate Summary & PDF"):
             st.error("Could not extract a valid YouTube Video ID. Please check the URL format.")
         else:
             try:
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    transcript = ""
+                client = genai.Client(api_key=api_key)
+                # Canonical URL: Gemini and yt-dlp both accept it, regardless of the pasted format
+                canonical_url = f"https://www.youtube.com/watch?v={video_id}"
+                summary = ""
 
-                    # --- APPROACH 1: Fast API Fetch ---
+                # --- APPROACH 1: Fast transcript fetch ---
+                transcript = ""
                 try:
                     with st.spinner("Attempting to fetch transcript directly from YouTube servers..."):
                         transcript = fetch_transcript(video_id)
-                        st.toast("⚡ Fast transcript fetched successfully!")
+                    st.toast("⚡ Fast transcript fetched successfully!")
                 except Exception as e:
-                    # Gracefully catch YouTube IP blocks on transcript API and jump straight to audio fallback
-                    st.warning(f"Direct transcript blocked ({type(e).__name__}). Switching to AI audio pipeline...")
-                    transcript = ""
+                    st.warning(f"Direct transcript unavailable ({type(e).__name__}). Trying Gemini video analysis...")
 
-                # --- APPROACH 2: Audio Download + Faster Whisper Fallback ---
-                if not transcript.strip():
-                    with st.spinner("Downloading audio..."):
-                        final_audio_path = download_audio(youtube_url, temp_dir)
-
-                    with st.spinner("Transcribing audio locally with AI (this may take a minute)..."):
-                        model = load_whisper_model()
-                        segments, info = model.transcribe(final_audio_path, beam_size=5)
-                        transcript = " ".join(segment.text for segment in segments)
-                        
-                    # --- Step 3: Summarize ---
+                if transcript.strip():
                     with st.spinner("Summarizing transcript with Gemini..."):
-                        client = genai.Client(api_key=api_key)
-                        prompt = f"Summarize the following video transcript.\n\nTranscript:\n{transcript}"
-                        
-                        response = client.models.generate_content(
-                            model=GEMINI_MODEL,
-                            contents=prompt,
-                            config=types.GenerateContentConfig(
-                                system_instruction=custom_instructions,
-                            )
-                        )
-                        summary = response.text
+                        summary = summarize_transcript(client, transcript)
 
-                    # Seed the editable text box with the new summary
-                    st.session_state["result"] = {"summary": summary}
-                    st.session_state["edited_summary"] = summary
-                    st.session_state["pdf_title"] = "Video Summary"
-                    st.session_state["pdf_footer"] = "Video Summary"
+                # --- APPROACH 2: Gemini watches the video itself (not affected by YouTube IP blocks) ---
+                if not summary:
+                    try:
+                        with st.spinner("Gemini is watching the video (this may take a minute)..."):
+                            summary = summarize_youtube_url(client, canonical_url)
+                        st.toast("🎬 Summary generated directly from the video!")
+                    except Exception as e:
+                        st.warning(f"Gemini video analysis failed ({type(e).__name__}: {e}). Falling back to audio download...")
+
+                # --- APPROACH 3: Audio download + local Whisper transcription ---
+                if not summary:
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        with st.spinner("Downloading audio..."):
+                            audio_path = download_audio(canonical_url, temp_dir)
+
+                        with st.spinner("Transcribing audio locally with AI (this may take a minute)..."):
+                            model = load_whisper_model()
+                            segments, _ = model.transcribe(audio_path, beam_size=5)
+                            transcript = " ".join(segment.text for segment in segments)
+
+                    with st.spinner("Summarizing transcript with Gemini..."):
+                        summary = summarize_transcript(client, transcript)
+
+                # Seed the editable text box with the new summary
+                st.session_state["result"] = {"summary": summary}
+                st.session_state["edited_summary"] = summary
+                st.session_state["pdf_title"] = "Video Summary"
+                st.session_state["pdf_footer"] = "Video Summary"
 
             except Exception:
                 st.error("A background component crashed. See the exact details below:")
