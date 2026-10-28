@@ -4,6 +4,7 @@ faster-whisper
 google-genai
 yt-dlp[default]
 fpdf2
+uharfbuzz
 curl_cffi
 python-dotenv
 yt-dlp-ejs

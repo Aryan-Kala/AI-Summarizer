@@ -1,11 +1,12 @@
 import base64
+import json
 import os
 import re
 import tempfile
 import urllib.request
 from datetime import datetime
 import traceback
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -36,8 +37,15 @@ Rules:
 - Never mention the name of the educator, teacher, instructor, speaker, host, channel, academy or institute. If someone must be referred to, say "the instructor" or "the speaker".
 - Do not include greetings, intros, subscribe requests, promotions or other filler.
 - Do not use markdown symbols like ** or #. Plain text and "- " bullets only.
-- Write the summary in English, even if the transcript is in another language.
 """
+
+# The selected language is appended to the instructions at request time
+LANGUAGES = [
+    "English", "Hindi", "Spanish", "French", "German", "Portuguese", "Italian",
+    "Dutch", "Russian", "Turkish", "Indonesian", "Vietnamese", "Arabic", "Urdu",
+    "Bengali", "Marathi", "Gujarati", "Punjabi", "Tamil", "Telugu", "Kannada",
+    "Malayalam", "Thai", "Chinese (Simplified)", "Japanese", "Korean",
+]
 
 THEMES = {
     "Navy & Gold":     {"primary": (18, 32, 64),  "accent": (191, 155, 48)},
@@ -70,6 +78,7 @@ custom_instructions = st.sidebar.text_area(
     value=DEFAULT_INSTRUCTIONS,
     height=300,
 )
+summary_language = st.sidebar.selectbox("Summary language:", LANGUAGES)
 
 
 st.sidebar.header("PDF Style")
@@ -119,6 +128,24 @@ def fetch_transcript(video_id):
     fetched = transcript.fetch()
     return " ".join(snippet.text for snippet in fetched)
 
+
+def fetch_video_title(video_id):
+    """oEmbed is a lightweight public endpoint that isn't behind YouTube's
+    bot checks, so it usually works even from cloud IPs."""
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        with urllib.request.urlopen(f"https://www.youtube.com/oembed?format=json&url={quote(video_url, safe='')}", timeout=10) as r:
+            return json.load(r).get("title")
+    except Exception:
+        return None
+
+
+def safe_filename(title):
+    """Strips characters that Windows/macOS don't allow in file names."""
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', " ", title)
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    return (name[:150] or "video_summary") + ".pdf"
+
 def download_audio(youtube_url, temp_dir):
     """Downloads the audio track with yt-dlp. faster-whisper decodes any
     audio format itself, so no ffmpeg conversion step is needed."""
@@ -141,7 +168,7 @@ def download_audio(youtube_url, temp_dir):
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(youtube_url, download=True)
 
-    return info["requested_downloads"][0]["filepath"]
+    return info["requested_downloads"][0]["filepath"], info.get("title")
 
 
 def response_text(response):
@@ -151,11 +178,19 @@ def response_text(response):
     return text
 
 
+def system_instruction():
+    return (
+        f"{custom_instructions.strip()}\n"
+        f"- Write the entire summary, including headings, in {summary_language}, even if the video is in another language. "
+        "Keep formulas, code and technical terms that have no common translation as they are."
+    )
+
+
 def summarize_transcript(client, transcript):
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=f"Summarize the following video transcript.\n\nTranscript:\n{transcript}",
-        config=types.GenerateContentConfig(system_instruction=custom_instructions),
+        config=types.GenerateContentConfig(system_instruction=system_instruction()),
     )
     return response_text(response)
 
@@ -171,7 +206,7 @@ def summarize_youtube_url(client, youtube_url):
             types.Part(text="Summarize this video based on everything that is said and shown in it."),
         ]),
         config=types.GenerateContentConfig(
-            system_instruction=custom_instructions,
+            system_instruction=system_instruction(),
             media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,
         ),
     )
@@ -198,6 +233,75 @@ def ensure_fonts():
         return False
 
 
+# Lato only covers Latin. Text in other scripts falls back to the matching
+# Noto font, downloaded only when the PDF actually contains that script.
+NOTO_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/"
+NOTO_LATIN = "notosans/NotoSans[wdth,wght].ttf"
+NOTO_SC = "notosanssc/NotoSansSC[wght].ttf"
+SCRIPT_FONTS = [  # (first codepoint, last codepoint, google/fonts file)
+    (0x0370, 0x052F, NOTO_LATIN),                                    # Greek, Cyrillic
+    (0x1E00, 0x1EFF, NOTO_LATIN),                                    # Vietnamese
+    (0x0600, 0x06FF, "notonaskharabic/NotoNaskhArabic[wght].ttf"),   # Arabic, Urdu
+    (0x0750, 0x077F, "notonaskharabic/NotoNaskhArabic[wght].ttf"),
+    (0xFB50, 0xFEFF, "notonaskharabic/NotoNaskhArabic[wght].ttf"),
+    (0x0900, 0x097F, "notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf"),
+    (0x0980, 0x09FF, "notosansbengali/NotoSansBengali[wdth,wght].ttf"),
+    (0x0A00, 0x0A7F, "notosansgurmukhi/NotoSansGurmukhi[wdth,wght].ttf"),
+    (0x0A80, 0x0AFF, "notosansgujarati/NotoSansGujarati[wdth,wght].ttf"),
+    (0x0B80, 0x0BFF, "notosanstamil/NotoSansTamil[wdth,wght].ttf"),
+    (0x0C00, 0x0C7F, "notosanstelugu/NotoSansTelugu[wdth,wght].ttf"),
+    (0x0C80, 0x0CFF, "notosanskannada/NotoSansKannada[wdth,wght].ttf"),
+    (0x0D00, 0x0D7F, "notosansmalayalam/NotoSansMalayalam[wdth,wght].ttf"),
+    (0x0E00, 0x0E7F, "notosansthai/NotoSansThai[wdth,wght].ttf"),
+    (0x3040, 0x30FF, "notosansjp/NotoSansJP[wght].ttf"),            # Japanese kana
+    (0x1100, 0x11FF, "notosanskr/NotoSansKR[wght].ttf"),            # Korean hangul
+    (0x3130, 0x318F, "notosanskr/NotoSansKR[wght].ttf"),
+    (0xAC00, 0xD7AF, "notosanskr/NotoSansKR[wght].ttf"),
+    (0x3000, 0x303F, NOTO_SC),                                       # CJK punctuation
+    (0x3400, 0x9FFF, NOTO_SC),                                       # Chinese characters
+    (0xFF00, 0xFFEF, NOTO_SC),
+]
+CJK_FONTS = ("notosansjp/NotoSansJP[wght].ttf", "notosanskr/NotoSansKR[wght].ttf")
+
+
+def needed_script_fonts(text):
+    files = []
+    for ch in set(text):
+        cp = ord(ch)
+        for lo, hi, font in SCRIPT_FONTS:
+            if lo <= cp <= hi and font not in files:
+                files.append(font)
+    # The Japanese/Korean fonts also contain Chinese characters (kanji/hanja)
+    if any(f in files for f in CJK_FONTS) and NOTO_SC in files:
+        files.remove(NOTO_SC)
+    return files
+
+
+@st.cache_resource
+def ensure_script_font(font):
+    """Returns (regular_path, bold_path) for a Noto font, or None if it can't be fetched.
+    Google ships variable fonts; static weights are cut once and kept on disk because
+    fpdf2 would otherwise redo that on every PDF build (~10s for the CJK fonts)."""
+    from fontTools.ttLib import TTFont
+    from fontTools.varLib.instancer import instantiateVariableFont
+
+    variable = os.path.join(FONT_DIR, os.path.basename(font))
+    stem = os.path.splitext(os.path.basename(font))[0].split("[")[0]
+    paths = tuple(os.path.join(FONT_DIR, f"{stem}-{w}.ttf") for w in (400, 700))
+    try:
+        if all(os.path.exists(p) and os.path.getsize(p) > 0 for p in paths):
+            return paths
+        if not os.path.exists(variable) or os.path.getsize(variable) == 0:
+            urllib.request.urlretrieve(NOTO_URL + quote(font), variable)
+        vf = TTFont(variable)
+        defaults = {axis.axisTag: axis.defaultValue for axis in vf["fvar"].axes}
+        for weight, path in zip((400, 700), paths):
+            instantiateVariableFont(vf, {**defaults, "wght": weight}, static=True).save(path)
+        os.remove(variable)
+        return paths
+    except Exception:
+        return None
+
 
 def clean_markdown(text, unicode_ok):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -213,7 +317,7 @@ def clean_markdown(text, unicode_ok):
 
 
 class PremiumPDF(FPDF):
-    def __init__(self, theme, fonts_ok, footer_text="Video Summary"):
+    def __init__(self, theme, fonts_ok, footer_text="Video Summary", script_fonts=()):
         super().__init__(format="A4")
         self.theme, self.fonts_ok, self.footer_text = theme, fonts_ok, footer_text
         self.set_margins(20, 18, 20)
@@ -226,8 +330,27 @@ class PremiumPDF(FPDF):
             self.add_font("LatoLight", "", p("Lato-Light.ttf"))
             self.add_font("LatoBlack", "", p("Lato-Black.ttf"))
             self.f_body, self.f_light, self.f_black = "Lato", "LatoLight", "LatoBlack"
+
+            fallbacks = []
+            for i, (regular, bold) in enumerate(script_fonts):
+                family = f"Script{i}"
+                self.add_font(family, "", regular)
+                self.add_font(family, "B", bold)
+                fallbacks.append(family)
+            if fallbacks:
+                self.set_fallback_fonts(fallbacks)
+                # Joins letters correctly for Indic/Arabic scripts and lays out right-to-left text
+                self.set_text_shaping(True)
         else:
             self.f_body = self.f_light = self.f_black = "helvetica"
+
+    def _render_styled_text_line(self, *args, **kwargs):
+        # fpdf2 2.8.9 bug: after a fallback-font fragment the PDF keeps that font
+        # active, but fpdf2 assumes the main font is, so a following line in the
+        # main font (e.g. English words in a Hindi summary) renders invisibly.
+        # Forcing the font to be re-selected for every line avoids it.
+        self.current_font_is_set_on_page = False
+        return super()._render_styled_text_line(*args, **kwargs)
 
     def footer(self):
         self.set_y(-14)
@@ -242,26 +365,31 @@ class PremiumPDF(FPDF):
         self.cell(0, 6, f"{self.page_no()}", align="R")
 
 
-def generate_pdf(summary_text, filepath, title="Video Summary", footer_text="Video Summary", theme_name="Navy & Gold", fonts_ok=True):
+def generate_pdf(summary_text, filepath, title="Video Summary", footer_text="Video Summary", theme_name="Navy & Gold", fonts_ok=True, script_fonts=()):
     theme = THEMES.get(theme_name, THEMES["Navy & Gold"])
-    pdf = PremiumPDF(theme, fonts_ok, footer_text=footer_text)
+    pdf = PremiumPDF(theme, fonts_ok, footer_text=footer_text, script_fonts=script_fonts)
     pdf.add_page()
 
-    # Cover banner
+    # Cover banner grows with the title (YouTube titles are often 2-3 lines)
+    title = clean_markdown(title, fonts_ok)
+    size, line_h = (26, 11) if len(title) <= 36 else (19, 9) if len(title) <= 80 else (16, 7.5)
+    pdf.set_font(pdf.f_black, size=size)
+    title_lines = len(pdf.multi_cell(0, line_h, title, dry_run=True, output="LINES"))
+    banner_h = max(52, 17 + title_lines * line_h + 8 + 9)
+
     pdf.set_fill_color(*theme["primary"])
-    pdf.rect(0, 0, pdf.w, 52, style="F")
+    pdf.rect(0, 0, pdf.w, banner_h, style="F")
     pdf.set_fill_color(*theme["accent"])
-    pdf.rect(0, 52, pdf.w, 1.6, style="F")
+    pdf.rect(0, banner_h, pdf.w, 1.6, style="F")
 
     pdf.set_xy(pdf.l_margin, 17)
     pdf.set_text_color(255, 255, 255)
-    pdf.set_font(pdf.f_black, size=26 if len(title) <= 36 else 19)
-    pdf.multi_cell(0, 11, clean_markdown(title, fonts_ok), new_x="LMARGIN", new_y="NEXT")
+    pdf.multi_cell(0, line_h, title, new_x="LMARGIN", new_y="NEXT")
     pdf.set_x(pdf.l_margin)
     pdf.set_text_color(*theme["accent"])
     pdf.set_font(pdf.f_light, size=10.5)
     pdf.cell(0, 8, datetime.now().strftime("%d %B %Y").upper() + "   |   KEY NOTES", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_y(66)
+    pdf.set_y(banner_h + 14)
 
     for raw in clean_markdown(summary_text, fonts_ok).splitlines():
         if not raw.strip():
@@ -454,6 +582,7 @@ if st.button("Generate Summary & PDF"):
                 # Canonical URL: Gemini and yt-dlp both accept it, regardless of the pasted format
                 canonical_url = f"https://www.youtube.com/watch?v={video_id}"
                 summary = ""
+                video_title = fetch_video_title(video_id)
 
                 # --- APPROACH 1: Fast transcript fetch ---
                 transcript = ""
@@ -481,7 +610,8 @@ if st.button("Generate Summary & PDF"):
                 if not summary:
                     with tempfile.TemporaryDirectory() as temp_dir:
                         with st.spinner("Downloading audio..."):
-                            audio_path = download_audio(canonical_url, temp_dir)
+                            audio_path, ytdlp_title = download_audio(canonical_url, temp_dir)
+                            video_title = video_title or ytdlp_title
 
                         with st.spinner("Transcribing audio locally with AI (this may take a minute)..."):
                             model = load_whisper_model()
@@ -494,7 +624,7 @@ if st.button("Generate Summary & PDF"):
                 # Seed the editable text box with the new summary
                 st.session_state["result"] = {"summary": summary}
                 st.session_state["edited_summary"] = summary
-                st.session_state["pdf_title"] = "Video Summary"
+                st.session_state["pdf_title"] = video_title or "Video Summary"
                 st.session_state["pdf_footer"] = "Video Summary"
 
             except Exception:
@@ -519,17 +649,28 @@ if "result" in st.session_state:
 
     if edited.strip():
         try:
+            pdf_title = pdf_title or "Video Summary"
+            script_fonts = []
+            if fonts_ok:
+                with st.spinner("Loading fonts for this language..."):
+                    for font in needed_script_fonts(edited + pdf_title + pdf_footer):
+                        path = ensure_script_font(font)
+                        if path:
+                            script_fonts.append(path)
+                        else:
+                            st.warning(f"Could not download the font for some characters ({font.split('/')[0]}). They may be missing from the PDF.")
+
             with tempfile.TemporaryDirectory() as tmp:
                 pdf_path = os.path.join(tmp, "summary.pdf")
-                generate_pdf(edited, pdf_path, title=pdf_title or "Video Summary",
-                             footer_text=pdf_footer, theme_name=theme_name, fonts_ok=fonts_ok)
+                generate_pdf(edited, pdf_path, title=pdf_title, footer_text=pdf_footer,
+                             theme_name=theme_name, fonts_ok=fonts_ok, script_fonts=script_fonts)
                 with open(pdf_path, "rb") as f:
                     pdf_bytes = f.read()
 
             st.download_button(
                 label="📄 Download PDF Summary",
                 data=pdf_bytes,
-                file_name="video_summary.pdf",
+                file_name=safe_filename(pdf_title),
                 mime="application/pdf",
             )
 
