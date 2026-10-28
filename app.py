@@ -385,7 +385,7 @@ class PremiumPDF(FPDF):
         self.set_line_width(0.4)
         self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
         self.set_y(-11)
-        self.set_font(self.f_light, size=8.5)
+        self.set_font(self.f_body, "B", size=10)
         self.set_text_color(*MUTED)
         self.cell(0, 6, clean_markdown(self.footer_text, self.fonts_ok), align="L")
         self.set_x(self.l_margin)
