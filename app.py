@@ -55,6 +55,7 @@ THEMES = {
     "Emerald & Cream": {"primary": (14, 74, 62),  "accent": (201, 164, 92)},
     "Charcoal & Rose": {"primary": (38, 38, 43),  "accent": (190, 80, 100)},
 }
+DEFAULT_FOOTER = "Aryan Kala [ IIT Madras]"
 BODY = (45, 45, 52)
 MUTED = (125, 125, 135)
 
@@ -86,6 +87,8 @@ summary_language = st.sidebar.selectbox("Summary language:", LANGUAGES)
 
 st.sidebar.header("PDF Style")
 theme_name = st.sidebar.selectbox("Colour theme:", list(THEMES.keys()))
+custom_title = st.sidebar.text_input("PDF title:", placeholder="Leave blank to use the video title")
+default_footer = st.sidebar.text_input("PDF footer:", value=DEFAULT_FOOTER)
 
 
 # --- Caching AI Model ---
@@ -341,7 +344,7 @@ def clean_markdown(text, unicode_ok):
 
 
 class PremiumPDF(FPDF):
-    def __init__(self, theme, fonts_ok, footer_text="Video Summary", script_fonts=()):
+    def __init__(self, theme, fonts_ok, footer_text=DEFAULT_FOOTER, script_fonts=()):
         super().__init__(format="A4")
         self.theme, self.fonts_ok, self.footer_text = theme, fonts_ok, footer_text
         self.set_margins(20, 18, 20)
@@ -389,7 +392,7 @@ class PremiumPDF(FPDF):
         self.cell(0, 6, f"{self.page_no()}", align="R")
 
 
-def generate_pdf(summary_text, filepath, title="Video Summary", footer_text="Video Summary", theme_name="Navy & Gold", fonts_ok=True, script_fonts=()):
+def generate_pdf(summary_text, filepath, title="Video Summary", footer_text=DEFAULT_FOOTER, theme_name="Navy & Gold", fonts_ok=True, script_fonts=()):
     theme = THEMES.get(theme_name, THEMES["Navy & Gold"])
     pdf = PremiumPDF(theme, fonts_ok, footer_text=footer_text, script_fonts=script_fonts)
     pdf.add_page()
@@ -656,11 +659,9 @@ if st.button("Generate Summary & PDF"):
                 # Seed the editable text box with the new summary
                 st.session_state["result"] = {"summary": summary}
                 st.session_state["edited_summary"] = summary
-                st.session_state["pdf_title"] = video_title or "Video Summary"
-                st.session_state["pdf_footer"] = "Video Summary"
+                st.session_state["pdf_title"] = custom_title.strip() or video_title or "Video Summary"
+                st.session_state["pdf_footer"] = default_footer
 
-            except GeminiBusyError as e:
-                st.error(f"⏳ {e}")
             except Exception:
                 st.error("A background component crashed. See the exact details below:")
                 st.code(traceback.format_exc())
@@ -670,9 +671,9 @@ if "result" in st.session_state:
     st.success("Summary generated! Edit it below, then download your PDF.")
 
     if "pdf_footer" not in st.session_state:
-        st.session_state["pdf_footer"] = "Video Summary"
+        st.session_state["pdf_footer"] = default_footer
 
-    pdf_title = st.text_input("PDF title:", key="pdf_title")
+    pdf_title = st.text_input("PDF title (also used as the file name):", key="pdf_title")
     pdf_footer = st.text_input("PDF footer:", key="pdf_footer")
     st.caption('Tip: start a line with "- " for a bullet. A short line without "- " becomes a section heading.')
     edited = st.text_area("Edit your summary:", key="edited_summary", height=450)
