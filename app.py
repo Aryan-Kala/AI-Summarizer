@@ -12,6 +12,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import yt_dlp
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from dotenv import load_dotenv
 from faster_whisper import WhisperModel
@@ -22,7 +23,9 @@ from youtube_transcript_api.proxies import GenericProxyConfig
 # Load environment variables
 load_dotenv("pass.env")
 
-GEMINI_MODEL = "gemini-2.5-flash"  # gemini-1.5-* models are retired
+# Tried in order; the lighter model takes over when the first is overloaded (503)
+GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]  # gemini-1.5-* models are retired
+GEMINI_BUSY_CODES = (429, 500, 503, 504)
 
 # Optional: a residential proxy (e.g. http://user:pass@host:port) for the
 # transcript API and yt-dlp. YouTube blocks most cloud/datacenter IPs.
@@ -171,11 +174,34 @@ def download_audio(youtube_url, temp_dir):
     return info["requested_downloads"][0]["filepath"], info.get("title")
 
 
-def response_text(response):
-    text = (response.text or "").strip()
-    if not text:
-        raise RuntimeError("Gemini returned an empty response (it may have been blocked by safety filters).")
-    return text
+class GeminiBusyError(RuntimeError):
+    pass
+
+
+def make_client():
+    # The SDK retries 503/429 itself (5 attempts by default); fewer attempts
+    # per model means we switch to the fallback model sooner.
+    retry = types.HttpRetryOptions(attempts=3, initial_delay=2)
+    return genai.Client(api_key=api_key, http_options=types.HttpOptions(retry_options=retry))
+
+
+def generate(client, contents, config):
+    last_error = None
+    for model in GEMINI_MODELS:
+        try:
+            response = client.models.generate_content(model=model, contents=contents, config=config)
+        except genai_errors.APIError as e:
+            if e.code not in GEMINI_BUSY_CODES:
+                raise
+            last_error = e
+            continue
+        text = (response.text or "").strip()
+        if not text:
+            raise RuntimeError("Gemini returned an empty response (it may have been blocked by safety filters).")
+        return text
+    if last_error.code == 429:
+        raise GeminiBusyError("Gemini rate limit or daily quota reached. Wait a minute and click Generate again.")
+    raise GeminiBusyError("Gemini is overloaded right now (high demand on Google's side). Wait a minute and click Generate again.")
 
 
 def system_instruction():
@@ -187,20 +213,19 @@ def system_instruction():
 
 
 def summarize_transcript(client, transcript):
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
+    return generate(
+        client,
         contents=f"Summarize the following video transcript.\n\nTranscript:\n{transcript}",
         config=types.GenerateContentConfig(system_instruction=system_instruction()),
     )
-    return response_text(response)
 
 
 def summarize_youtube_url(client, youtube_url):
     """Gemini fetches public YouTube videos itself, so this never hits
     YouTube's block on our server's IP. Low resolution keeps long videos
     within the context window (the summary relies mostly on the audio)."""
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
+    return generate(
+        client,
         contents=types.Content(parts=[
             types.Part(file_data=types.FileData(file_uri=youtube_url)),
             types.Part(text="Summarize this video based on everything that is said and shown in it."),
@@ -210,7 +235,6 @@ def summarize_youtube_url(client, youtube_url):
             media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,
         ),
     )
-    return response_text(response)
 
 
 # --- Premium PDF fonts (Lato, auto-downloaded once into ./fonts) ---
@@ -578,20 +602,25 @@ if st.button("Generate Summary & PDF"):
             st.error("Could not extract a valid YouTube Video ID. Please check the URL format.")
         else:
             try:
-                client = genai.Client(api_key=api_key)
+                client = make_client()
                 # Canonical URL: Gemini and yt-dlp both accept it, regardless of the pasted format
                 canonical_url = f"https://www.youtube.com/watch?v={video_id}"
                 summary = ""
                 video_title = fetch_video_title(video_id)
 
+                # Reuse a transcript from an earlier attempt on this video (e.g. after Gemini was busy)
+                cached = st.session_state.get("transcript_cache")
+                transcript = cached[1] if cached and cached[0] == video_id else ""
+
                 # --- APPROACH 1: Fast transcript fetch ---
-                transcript = ""
-                try:
-                    with st.spinner("Attempting to fetch transcript directly from YouTube servers..."):
-                        transcript = fetch_transcript(video_id)
-                    st.toast("⚡ Fast transcript fetched successfully!")
-                except Exception as e:
-                    st.warning(f"Direct transcript unavailable ({type(e).__name__}). Trying Gemini video analysis...")
+                if not transcript:
+                    try:
+                        with st.spinner("Attempting to fetch transcript directly from YouTube servers..."):
+                            transcript = fetch_transcript(video_id)
+                        st.session_state["transcript_cache"] = (video_id, transcript)
+                        st.toast("⚡ Fast transcript fetched successfully!")
+                    except Exception as e:
+                        st.warning(f"Direct transcript unavailable ({type(e).__name__}). Trying Gemini video analysis...")
 
                 if transcript.strip():
                     with st.spinner("Summarizing transcript with Gemini..."):
@@ -603,6 +632,8 @@ if st.button("Generate Summary & PDF"):
                         with st.spinner("Gemini is watching the video (this may take a minute)..."):
                             summary = summarize_youtube_url(client, canonical_url)
                         st.toast("🎬 Summary generated directly from the video!")
+                    except GeminiBusyError:
+                        raise  # downloading the audio won't help: its summary needs Gemini too
                     except Exception as e:
                         st.warning(f"Gemini video analysis failed ({type(e).__name__}: {e}). Falling back to audio download...")
 
@@ -617,6 +648,7 @@ if st.button("Generate Summary & PDF"):
                             model = load_whisper_model()
                             segments, _ = model.transcribe(audio_path, beam_size=5)
                             transcript = " ".join(segment.text for segment in segments)
+                    st.session_state["transcript_cache"] = (video_id, transcript)
 
                     with st.spinner("Summarizing transcript with Gemini..."):
                         summary = summarize_transcript(client, transcript)
@@ -627,6 +659,8 @@ if st.button("Generate Summary & PDF"):
                 st.session_state["pdf_title"] = video_title or "Video Summary"
                 st.session_state["pdf_footer"] = "Video Summary"
 
+            except GeminiBusyError as e:
+                st.error(f"⏳ {e}")
             except Exception:
                 st.error("A background component crashed. See the exact details below:")
                 st.code(traceback.format_exc())
